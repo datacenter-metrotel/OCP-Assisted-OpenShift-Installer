@@ -586,13 +586,16 @@ for i in "${!NODE_NAMES[@]}"; do
         - name: ${NODE_IFACES[$i]}
           type: ethernet
           state: up
-          macAddress: ${NODE_MACS[$i]}
+          ethernet:
+            auto-negotiation: true
           ipv4:
             enabled: true
             address:
               - ip: ${NODE_IPS[$i]}
                 prefix-length: ${NET_PREFIX}
             dhcp: false
+          ipv6:
+            enabled: false
       dns-resolver:
         config:
           server:
