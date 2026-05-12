@@ -40,14 +40,15 @@ info() { echo -e "  ${WHT}→${NC} $1"; }
 
 ask() {
   # ask "Pregunta" "default"
+  # Prompt en la misma linea: "  Nombre [default]: _"
   local prompt="$1"
   local default="${2:-}"
+  local val
   if [ -n "$default" ]; then
-    echo -ne "  ${WHT}${prompt}${NC} ${YEL}[${default}]${NC}: "
+    read -erp $'  \\e[1;37m'${prompt}$'\\e[0m \\e[1;33m['${default}$']\\e[0m: ' val
   else
-    echo -ne "  ${WHT}${prompt}${NC}: "
+    read -erp $'  \\e[1;37m'${prompt}$'\\e[0m: ' val
   fi
-  read -r val
   if [ -z "$val" ] && [ -n "$default" ]; then
     val="$default"
   fi
@@ -56,15 +57,15 @@ ask() {
 
 ask_secret() {
   local prompt="$1"
-  echo -ne "  ${WHT}${prompt}${NC}: "
-  read -rs val
+  local val
+  read -rsp $'  \e[1;37m'${prompt}$'\e[0m: ' val
   echo ""
   echo "$val"
 }
 
 confirm() {
-  echo -ne "  ${WHT}$1${NC} ${YEL}[s/N]${NC}: "
-  read -r yn
+  local yn
+  read -erp $'  \e[1;37m'$1$'\e[0m \e[1;33m[s/N]\e[0m: ' yn
   [[ "$yn" =~ ^[sS]$ ]]
 }
 
@@ -276,6 +277,49 @@ step "DNS y NTP"
 DNS_SERVER=$(ask_ip "Servidor DNS primario" "172.18.194.1")
 NTP_SERVER=$(ask "Servidor NTP" "pool.ntp.org")
 
+# ── Mostrar registros DNS requeridos ─────────────────────────
+echo ""
+echo -e "  ${YEL}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "  ${YEL}${BOLD}║         REGISTROS DNS QUE DEBES CREAR AHORA             ║${NC}"
+echo -e "  ${YEL}${BOLD}║   Configurarlos ANTES de bootear las VMs con la ISO     ║${NC}"
+echo -e "  ${YEL}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+if [ "$NODE_COUNT" -eq 1 ]; then
+  # SNO — los VIPs los tenemos recien cuando el usuario ingrese la IP del nodo
+  # Los mostramos despues de recopilar los nodos. Guardamos flag.
+  DNS_PENDING=true
+else
+  DNS_PENDING=false
+  echo -e "  ${WHT}Agregar en tu servidor DNS (${DNS_SERVER}):${NC}"
+  echo ""
+  echo -e "  ${GRN}# Registro A — API del cluster${NC}"
+  echo -e "  ${BOLD}api.${CLUSTER_NAME}.${BASE_DOMAIN}.      IN A  ${API_VIP}${NC}"
+  echo ""
+  echo -e "  ${GRN}# Registro A — API interna (mismo VIP)${NC}"
+  echo -e "  ${BOLD}api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN A  ${API_VIP}${NC}"
+  echo ""
+  echo -e "  ${GRN}# Wildcard — Ingress / Apps${NC}"
+  echo -e "  ${BOLD}*.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.   IN A  ${INGRESS_VIP}${NC}"
+  echo ""
+  echo -e "  ${GRN}# Registros PTR — DNS inverso (recomendado)${NC}"
+  # Calcular reverso del API_VIP
+  IFS='.' read -ra _OCT <<< "${API_VIP}"
+  echo -e "  ${BOLD}${_OCT[3]}.${_OCT[2]}.${_OCT[1]}.${_OCT[0]}.in-addr.arpa.  IN PTR  api.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+  IFS='.' read -ra _OCT <<< "${INGRESS_VIP}"
+  echo -e "  ${BOLD}${_OCT[3]}.${_OCT[2]}.${_OCT[1]}.${_OCT[0]}.in-addr.arpa.  IN PTR  *.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+  echo ""
+  echo -e "  ${GRN}# Opcion alternativa — /etc/hosts en cada nodo y en este server:${NC}"
+  echo -e "  ${CYN}echo '${API_VIP}  api.${CLUSTER_NAME}.${BASE_DOMAIN} api-int.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+  echo -e "  ${CYN}echo '${INGRESS_VIP}  console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+  echo -e "  ${CYN}echo '${INGRESS_VIP}  oauth-openshift.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+  echo ""
+  echo -e "  ${RED}${BOLD}IMPORTANTE:${NC} Sin estos registros DNS el cluster NO puede instalarse."
+  echo -e "  ${RED}${BOLD}IMPORTANTE:${NC} Las VMs deben poder resolver estos nombres via ${DNS_SERVER}"
+fi
+echo ""
+read -rp "  Presiona ENTER cuando hayas anotado los registros DNS..."
+
 step "SSH — clave publica para acceso a los nodos"
 if [ -f ~/.ssh/id_rsa.pub ]; then
   SSH_KEY_DEFAULT=$(cat ~/.ssh/id_rsa.pub)
@@ -339,10 +383,64 @@ if [ "$NODE_COUNT" -eq 1 ]; then
   API_VIP="${NODE_IPS[0]}"
   INGRESS_VIP="${NODE_IPS[0]}"
   info "SNO: API VIP e Ingress VIP = ${API_VIP}"
+
+  # Mostrar DNS para SNO (ahora que tenemos la IP)
+  if [ "${DNS_PENDING:-false}" = true ]; then
+    echo ""
+    echo -e "  ${YEL}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${YEL}${BOLD}║         REGISTROS DNS QUE DEBES CREAR AHORA             ║${NC}"
+    echo -e "  ${YEL}${BOLD}║   Configurarlos ANTES de bootear la VM con la ISO       ║${NC}"
+    echo -e "  ${YEL}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${WHT}Agregar en tu servidor DNS (${DNS_SERVER}):${NC}"
+    echo ""
+    echo -e "  ${GRN}# Registro A — API del cluster${NC}"
+    echo -e "  ${BOLD}api.${CLUSTER_NAME}.${BASE_DOMAIN}.      IN A  ${API_VIP}${NC}"
+    echo ""
+    echo -e "  ${GRN}# Registro A — API interna (mismo IP en SNO)${NC}"
+    echo -e "  ${BOLD}api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN A  ${API_VIP}${NC}"
+    echo ""
+    echo -e "  ${GRN}# Wildcard — Ingress / Apps${NC}"
+    echo -e "  ${BOLD}*.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.   IN A  ${INGRESS_VIP}${NC}"
+    echo ""
+    echo -e "  ${GRN}# Registro A — el nodo mismo${NC}"
+    echo -e "  ${BOLD}master-0.${CLUSTER_NAME}.${BASE_DOMAIN}. IN A  ${API_VIP}${NC}"
+    echo ""
+    echo -e "  ${GRN}# Registro PTR — DNS inverso${NC}"
+    IFS='.' read -ra _OCT <<< "${API_VIP}"
+    echo -e "  ${BOLD}${_OCT[3]}.${_OCT[2]}.${_OCT[1]}.${_OCT[0]}.in-addr.arpa.  IN PTR  master-0.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+    echo ""
+    echo -e "  ${GRN}# Opcion alternativa — /etc/hosts en este server:${NC}"
+    echo -e "  ${CYN}echo '${API_VIP}  api.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+    echo -e "  ${CYN}echo '${API_VIP}  api-int.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+    echo -e "  ${CYN}echo '${API_VIP}  console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+    echo -e "  ${CYN}echo '${API_VIP}  oauth-openshift.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+    echo ""
+    echo -e "  ${RED}${BOLD}IMPORTANTE:${NC} Sin estos registros DNS el cluster NO puede instalarse."
+    echo -e "  ${RED}${BOLD}IMPORTANTE:${NC} La VM debe poder resolver estos nombres via ${DNS_SERVER}"
+    echo ""
+    read -rp "  Presiona ENTER cuando hayas anotado los registros DNS..."
+  fi
 else
   for i in 0 1 2; do
     collect_node "$i" "master"
   done
+
+  # Mostrar DNS por nodo para HA
+  echo ""
+  echo -e "  ${GRN}# Registros A por nodo (para etcd y comunicacion interna):${NC}"
+  for i in "${!NODE_NAMES[@]}"; do
+    echo -e "  ${BOLD}${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN A  ${NODE_IPS[$i]}${NC}"
+    IFS='.' read -ra _OCT <<< "${NODE_IPS[$i]}"
+    echo -e "  ${BOLD}${_OCT[3]}.${_OCT[2]}.${_OCT[1]}.${_OCT[0]}.in-addr.arpa.  IN PTR  ${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+  done
+  echo ""
+  echo -e "  ${GRN}# etcd SRV records (requeridos para cluster HA):${NC}"
+  for i in "${!NODE_NAMES[@]}"; do
+    echo -e "  ${BOLD}_etcd-server-ssl._tcp.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN SRV  0 10 2380 ${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+  done
+  echo ""
+  read -rp "  Presiona ENTER cuando hayas anotado los registros DNS..."
 fi
 
 step "Prefijo de red (mascara para IPs estaticas)"
@@ -633,36 +731,85 @@ if [ -n "$ISO_FILE" ] && [ -f "$ISO_FILE" ]; then
   echo -e "${NC}"
   ok "ISO: ${ISO_FILE}"
   ok "Tamano: ${ISO_SIZE}"
+
+  # ── Mostrar nodos a bootear ──────────────────────────────────
   echo ""
-  echo -e "  ${WHT}${BOLD}Proximos pasos:${NC}"
+  echo -e "  ${BLU}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
+  echo -e "  ${BLU}${BOLD}║              PROXIMOS PASOS                             ║${NC}"
+  echo -e "  ${BLU}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
   echo ""
+
   if [ "$NODE_COUNT" -eq 1 ]; then
-    echo -e "  ${YEL}1)${NC} Montar la ISO en la VM ${NODE_NAMES[0]} (${NODE_IPS[0]})"
-    echo -e "  ${YEL}2)${NC} Bootear la VM desde la ISO"
-    echo -e "  ${YEL}3)${NC} Monitorear: openshift-install agent wait-for bootstrap-complete --dir ${CLUSTER_DIR}"
-    echo -e "  ${YEL}4)${NC} Monitorear: openshift-install agent wait-for install-complete  --dir ${CLUSTER_DIR}"
+    echo -e "  ${YEL}${BOLD}1. Montar la ISO en la VM y bootear${NC}"
+    echo -e "     VM:  ${GRN}${NODE_NAMES[0]}${NC}  |  IP: ${GRN}${NODE_IPS[0]}${NC}  |  MAC: ${GRN}${NODE_MACS[0]}${NC}"
+    echo -e "     ISO: ${GRN}${ISO_FILE}${NC}"
   else
-    echo -e "  ${YEL}1)${NC} Montar la MISMA ISO en las 3 VMs:"
+    echo -e "  ${YEL}${BOLD}1. Montar la MISMA ISO en las 3 VMs y bootear${NC}"
+    echo -e "     (pueden arrancar en cualquier orden)"
+    echo ""
     for i in "${!NODE_NAMES[@]}"; do
-      echo -e "     ${GRN}${NODE_NAMES[$i]}${NC} — MAC: ${NODE_MACS[$i]} — IP: ${NODE_IPS[$i]}"
+      echo -e "     ${GRN}${NODE_NAMES[$i]}${NC}  |  IP: ${GRN}${NODE_IPS[$i]}${NC}  |  MAC: ${GRN}${NODE_MACS[$i]}${NC}"
     done
-    echo ""
-    echo -e "  ${YEL}2)${NC} Bootear las 3 VMs desde la ISO (pueden arrancar en cualquier orden)"
-    echo -e "  ${YEL}3)${NC} Monitorear instalacion:"
-    echo -e "     ${CYN}openshift-install agent wait-for bootstrap-complete --dir ${CLUSTER_DIR}${NC}"
-    echo -e "     ${CYN}openshift-install agent wait-for install-complete   --dir ${CLUSTER_DIR}${NC}"
-    echo ""
-    echo -e "  ${YEL}4)${NC} Agregar DNS records:"
-    echo -e "     api.${CLUSTER_NAME}.${BASE_DOMAIN}     -> ${API_VIP}"
-    echo -e "     *.apps.${CLUSTER_NAME}.${BASE_DOMAIN}  -> ${INGRESS_VIP}"
+    echo -e "     ISO: ${GRN}${ISO_FILE}${NC}"
   fi
+
   echo ""
-  echo -e "  ${YEL}5)${NC} Obtener kubeconfig:"
-  echo -e "     ${CYN}export KUBECONFIG=${CLUSTER_DIR}/auth/kubeconfig${NC}"
-  echo -e "     ${CYN}oc get nodes${NC}"
+  echo -e "  ${YEL}${BOLD}2. Monitorear el proceso de instalacion${NC}"
   echo ""
-  echo -e "  ${YEL}6)${NC} Obtener password de kubeadmin:"
-  echo -e "     ${CYN}cat ${CLUSTER_DIR}/auth/kubeadmin-password${NC}"
+  echo -e "  ${CYN}openshift-install agent wait-for bootstrap-complete \\${NC}"
+  echo -e "  ${CYN}  --dir ${CLUSTER_DIR}${NC}"
+  echo ""
+  echo -e "  ${CYN}openshift-install agent wait-for install-complete \\${NC}"
+  echo -e "  ${CYN}  --dir ${CLUSTER_DIR}${NC}"
+
+  echo ""
+  echo -e "  ${YEL}${BOLD}3. Acceder al cluster${NC}"
+  echo ""
+  echo -e "  ${CYN}export KUBECONFIG=${CLUSTER_DIR}/auth/kubeconfig${NC}"
+  echo -e "  ${CYN}oc get nodes${NC}"
+  echo -e "  ${CYN}oc get co${NC}   ${WHT}# cluster operators${NC}"
+
+  echo ""
+  echo -e "  ${YEL}${BOLD}4. Password de kubeadmin${NC}"
+  echo ""
+  echo -e "  ${CYN}cat ${CLUSTER_DIR}/auth/kubeadmin-password${NC}"
+
+  echo ""
+  echo -e "  ${YEL}${BOLD}5. Consola web${NC}"
+  echo ""
+  echo -e "  ${WHT}https://console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}${NC}"
+
+  # ── Guardar comandos en un archivo de referencia ─────────────
+  cat > "${CLUSTER_DIR}/post-install-commands.sh" << POSTCMD
+#!/bin/bash
+# Comandos post-instalacion — cluster: ${CLUSTER_NAME}.${BASE_DOMAIN}
+# Generado por 05-generate-cluster-iso.sh
+
+# 1. Montar la ISO en la/s VM/s y bootear
+# ISO: ${ISO_FILE}
+EOF_ISO
+
+# 2. Monitorear el proceso de instalacion
+openshift-install agent wait-for bootstrap-complete \
+  --dir ${CLUSTER_DIR}
+
+openshift-install agent wait-for install-complete \
+  --dir ${CLUSTER_DIR}
+
+# 3. Acceder al cluster
+export KUBECONFIG=${CLUSTER_DIR}/auth/kubeconfig
+oc get nodes
+oc get co    # cluster operators
+
+# 4. Password de kubeadmin
+cat ${CLUSTER_DIR}/auth/kubeadmin-password
+
+# 5. Consola web
+echo "https://console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}"
+POSTCMD
+  chmod +x "${CLUSTER_DIR}/post-install-commands.sh"
+  echo ""
+  ok "Comandos guardados en: ${CLUSTER_DIR}/post-install-commands.sh"
 else
   err "No se encontro la ISO generada."
   warn "Revisar log: ${CLUSTER_DIR}/iso-generate.log"
