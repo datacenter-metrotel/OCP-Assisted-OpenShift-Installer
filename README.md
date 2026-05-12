@@ -222,3 +222,192 @@ sudo podman run -d --name assisted-installer-ui \
   usan `--dest-skip-tls` y `--dest-use-http`.
 - Las credenciales del registry local son placeholder (`unused:unused`) ya que
   no tiene autenticación configurada.
+
+---
+
+## Script 05 — Generador de ISO para Agent Based Installer
+
+```bash
+bash /root/OC-Mirror/05-generate-cluster-iso.sh
+```
+
+Wizard interactivo de 7 pasos que genera la ISO de instalación para un cluster OCP de 1 o 3 nodos usando el registry mirror local. No requiere acceso a internet.
+
+### Topologías soportadas
+
+| Tipo | Nodos | Descripción |
+|---|---|---|
+| SNO | 1 VM | etcd + control plane + worker en una sola máquina |
+| HA  | 3 VMs | 3x control plane + etcd, cada nodo también schedulea workloads |
+
+En ambos casos genera **una sola ISO**. Para HA, la misma ISO se monta en las 3 VMs — la diferencia entre nodos se resuelve por MAC address en el `agent-config.yaml`.
+
+### Pasos del wizard
+
+| Paso | Qué hace |
+|---|---|
+| 1 — Prerequisitos | Verifica `openshift-install`, pull-secret, registry y ICSP |
+| 2 — Topología | Elegís 1 (SNO) o 3 (HA) |
+| 3 — Datos del cluster | Nombre, dominio, CIDRs, VIPs, DNS, NTP, SSH key |
+| 4 — Nodos | MAC, IP estática e interfaz por cada VM |
+| 5 — Mirror | Lee el ICSP de oc-mirror y lo inyecta en los configs |
+| 6 — Resumen | Muestra todo y pide confirmación |
+| 7 — Genera | Produce install-config.yaml + agent-config.yaml + ISO |
+
+### Fixes aplicados al wizard
+
+| Error | Causa | Solución aplicada |
+|---|---|---|
+| `nmstatectl: executable not found` | nmstate no instalado | `dnf install -y nmstate` antes de correr el wizard |
+| `unknown field macAddress at line 7` | nmstatectl v2 no acepta MAC dentro de `networkConfig.interfaces` | MAC removida del bloque networkConfig, agregado bloque `ethernet:` y `ipv6: enabled: false` |
+
+### Prerequisito adicional — nmstate
+
+```bash
+# Instalar antes de correr el wizard
+dnf install -y nmstate
+
+# Verificar version
+nmstatectl version
+```
+
+### Estructura correcta del networkConfig (nmstatectl v2.x)
+
+```yaml
+hosts:
+  - hostname: master-0
+    role: master
+    interfaces:
+      - name: ens192
+        macAddress: AA:BB:CC:DD:EE:FF   # MAC solo aqui
+    networkConfig:
+      interfaces:
+        - name: ens192
+          type: ethernet
+          state: up
+          ethernet:                      # requerido en nmstate v2
+            auto-negotiation: true
+          ipv4:
+            enabled: true
+            address:
+              - ip: 172.18.194.191
+                prefix-length: 24
+            dhcp: false
+          ipv6:
+            enabled: false              # requerido explicitamente
+      dns-resolver:
+        config:
+          server:
+            - 172.18.194.36
+            - 172.18.194.37
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 172.18.194.1
+            next-hop-interface: ens192
+            table-id: 254
+```
+
+### Registros DNS requeridos
+
+El wizard los muestra en pantalla en cuanto ingresás nombre, dominio y VIPs. Deben crearse **antes de bootear las VMs** con la ISO.
+
+#### Para HA (3 nodos)
+
+```
+# API
+api.CLUSTER.DOMINIO.      IN A   API_VIP
+api-int.CLUSTER.DOMINIO.  IN A   API_VIP
+
+# Ingress / Apps
+*.apps.CLUSTER.DOMINIO.   IN A   INGRESS_VIP
+
+# DNS inverso
+X.X.X.X.in-addr.arpa.    IN PTR  api.CLUSTER.DOMINIO.
+X.X.X.X.in-addr.arpa.    IN PTR  *.apps.CLUSTER.DOMINIO.
+
+# Un registro A por nodo (etcd interno)
+master-0.CLUSTER.DOMINIO. IN A   IP_NODO_0
+master-1.CLUSTER.DOMINIO. IN A   IP_NODO_1
+master-2.CLUSTER.DOMINIO. IN A   IP_NODO_2
+
+# SRV records para etcd (requeridos en HA)
+_etcd-server-ssl._tcp.CLUSTER.DOMINIO. IN SRV 0 10 2380 master-0.CLUSTER.DOMINIO.
+_etcd-server-ssl._tcp.CLUSTER.DOMINIO. IN SRV 0 10 2380 master-1.CLUSTER.DOMINIO.
+_etcd-server-ssl._tcp.CLUSTER.DOMINIO. IN SRV 0 10 2380 master-2.CLUSTER.DOMINIO.
+```
+
+#### Para SNO (1 nodo)
+
+```
+api.CLUSTER.DOMINIO.      IN A   IP_NODO
+api-int.CLUSTER.DOMINIO.  IN A   IP_NODO
+*.apps.CLUSTER.DOMINIO.   IN A   IP_NODO
+master-0.CLUSTER.DOMINIO. IN A   IP_NODO
+X.X.X.X.in-addr.arpa.    IN PTR  master-0.CLUSTER.DOMINIO.
+```
+
+#### Alternativa rápida con /etc/hosts (si no tenés DNS interno)
+
+```bash
+# En el servidor 172.18.194.190 y en cada nodo del cluster:
+echo 'API_VIP     api.CLUSTER.DOMINIO api-int.CLUSTER.DOMINIO' >> /etc/hosts
+echo 'INGRESS_VIP console-openshift-console.apps.CLUSTER.DOMINIO' >> /etc/hosts
+echo 'INGRESS_VIP oauth-openshift.apps.CLUSTER.DOMINIO' >> /etc/hosts
+```
+
+### Qué genera el script
+
+```
+/root/OC-Mirror/cluster-output/NOMBRE-CLUSTER/
+├── install-config.yaml      ← config principal del cluster
+├── install-config.yaml.bak  ← backup (openshift-install consume el original)
+├── agent-config.yaml        ← config de nodos (MACs, IPs, roles)
+├── agent-config.yaml.bak    ← backup
+├── agent.x86_64.iso         ← ISO para bootear las VMs
+├── iso-generate.log         ← log de la generacion
+└── auth/
+    ├── kubeconfig           ← disponible tras instalacion exitosa
+    └── kubeadmin-password   ← password del usuario admin
+```
+
+### Después de generar la ISO
+
+```bash
+# 1. Montar la ISO en la/s VM/s y bootear
+
+# 2. Monitorear el proceso de instalacion
+openshift-install agent wait-for bootstrap-complete \
+  --dir /root/OC-Mirror/cluster-output/NOMBRE-CLUSTER
+
+openshift-install agent wait-for install-complete \
+  --dir /root/OC-Mirror/cluster-output/NOMBRE-CLUSTER
+
+# 3. Acceder al cluster
+export KUBECONFIG=/root/OC-Mirror/cluster-output/NOMBRE-CLUSTER/auth/kubeconfig
+oc get nodes
+oc get co    # cluster operators
+
+# 4. Password de kubeadmin
+cat /root/OC-Mirror/cluster-output/NOMBRE-CLUSTER/auth/kubeadmin-password
+```
+
+### Qué debe estar corriendo en el servidor antes de bootear las VMs
+
+```bash
+# Verificar contenedores activos
+podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+# Si alguno está caído, levantarlo
+podman start local-registry
+podman start postgres
+podman start assisted-installer-local
+podman start assisted-installer-ui
+
+# Verificar que el registry responde
+curl -s http://172.18.194.190:5000/v2/_catalog | python3 -m json.tool
+
+# Verificar puertos de firewall
+firewall-cmd --list-ports
+# Deben estar: 5000/tcp 8080/tcp 8090/tcp 9443/tcp
+```
