@@ -36,8 +36,7 @@ info()  { echo -e "  ${WHT}→${NC} $1"; }
 hint()  { echo -e "  ${DIM}    Ej: $1${NC}"; }
 sep()   { echo -e "  ${DIM}──────────────────────────────────────${NC}"; }
 
-# Pregunta con ejemplo y prompt en linea separada
-# ask_field "Titulo" "Descripcion ejemplo" "Nombre campo" "default"
+# ask_field "Titulo" "Ejemplo" "Nombre campo" "default"
 ask_field() {
   local title="$1"
   local example="$2"
@@ -46,25 +45,22 @@ ask_field() {
 
   echo ""
   echo -e "  ${WHT}${BOLD}${title}${NC}"
-  if [ -n "$example" ]; then
-    echo -e "  ${DIM}    Ej: ${example}${NC}"
-  fi
+  [ -n "$example" ] && echo -e "  ${DIM}    Ej: ${example}${NC}"
+  echo ""
   if [ -n "$default" ]; then
-    printf "  ${CYN}${field}${NC} ${DIM}[Enter = %s]${NC}: " "$default"
+    echo -n "  ${field} [Enter = ${default}]: "
   else
-    printf "  ${CYN}${field}${NC}: "
+    echo -n "  ${field}: "
   fi
   read -r _val
-  if [ -z "$_val" ] && [ -n "$default" ]; then
-    _val="$default"
-  fi
+  [ -z "$_val" ] && [ -n "$default" ] && _val="$default"
   echo "$_val"
 }
 
 confirm() {
   local msg="$1"
   echo ""
-  printf "  ${WHT}${msg}${NC} ${YEL}[s/N]${NC}: "
+  echo -n "  ${msg} [s/N]: "
   read -r _yn
   [[ "$_yn" =~ ^[sS]$ ]]
 }
@@ -94,7 +90,7 @@ ask_ip() {
   while true; do
     val=$(ask_field "$title" "$example" "$field" "$default")
     validate_ip "$val" && { echo "$val"; return; }
-    err "IP invalida: '$val'   Formato: x.x.x.x  (ej: 172.18.194.10)"
+    echo "  ERROR: IP invalida '$val'  Formato: x.x.x.x  (ej: 172.18.194.10)"
   done
 }
 
@@ -105,7 +101,7 @@ ask_mac() {
     val=$(ask_field "$title" "AA:BB:CC:DD:EE:FF" "$field" "")
     val="${val^^}"
     validate_mac "$val" && { echo "$val"; return; }
-    err "MAC invalida: '$val'   Formato: AA:BB:CC:DD:EE:FF"
+    echo "  ERROR: MAC invalida '$val'  Formato: AA:BB:CC:DD:EE:FF"
   done
 }
 
@@ -115,7 +111,7 @@ ask_cidr() {
   while true; do
     val=$(ask_field "$title" "$example" "$field" "$default")
     validate_cidr "$val" && { echo "$val"; return; }
-    err "CIDR invalido: '$val'   Formato: x.x.x.x/nn  (ej: 172.18.194.0/24)"
+    echo "  ERROR: CIDR invalido '$val'  Formato: x.x.x.x/nn  (ej: 172.18.194.0/24)"
   done
 }
 
@@ -197,7 +193,7 @@ fi
 echo ""
 ok "Todos los prerequisitos OK"
 echo ""
-printf "  Presiona ENTER para continuar..."; read -r _
+echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
 
 # ──────────────────────────────────────────────────────────────
 # PASO 2: TOPOLOGIA
@@ -216,7 +212,7 @@ echo -e "       ${DIM}Produccion. Cada nodo tambien puede schedulear workloads${
 echo ""
 
 while true; do
-  printf "  ${WHT}Cantidad de nodos${NC} ${DIM}[1 = SNO / 3 = HA]${NC}: "
+  echo -n "  Cantidad de nodos [1 = SNO  /  3 = HA]: "
   read -r NODE_COUNT
   case "$NODE_COUNT" in
     1) CLUSTER_TYPE="SNO"; break ;;
@@ -233,7 +229,7 @@ else
   info "Una sola ISO para las 3 VMs. Cada VM se identifica por su MAC address."
 fi
 echo ""
-printf "  Presiona ENTER para continuar..."; read -r _
+echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
 
 # ──────────────────────────────────────────────────────────────
 # PASO 3: DATOS DEL CLUSTER
@@ -368,19 +364,19 @@ if [ -f ~/.ssh/id_rsa.pub ]; then
     ok "Usando clave de ~/.ssh/id_rsa.pub"
   else
     echo ""
-    printf "  ${CYN}Clave SSH publica${NC}: "
+    echo -n "  Clave SSH publica: "
     read -r SSH_KEY
   fi
 else
   warn "No se encontro ~/.ssh/id_rsa.pub"
   info "Para generar una: ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ''"
   echo ""
-  printf "  ${CYN}Clave SSH publica${NC} ${DIM}(pegar aqui o Enter para omitir)${NC}: "
+  echo -n "  Clave SSH publica (pegar aqui o Enter para omitir): "
   read -r SSH_KEY
 fi
 
 echo ""
-printf "  Presiona ENTER para continuar..."; read -r _
+echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
 
 # ──────────────────────────────────────────────────────────────
 # PASO 4: NODOS
@@ -411,7 +407,7 @@ collect_node() {
   echo -e "  ${WHT}${BOLD}MAC address de la VM${NC}"
   echo -e "  ${DIM}    Ej: 52:54:00:AB:CD:$((10+idx*11)):$((idx+1))  (obtenla en el hipervisor)${NC}"
   while true; do
-    printf "  ${CYN}MAC${NC}: "
+    echo -n "MAC:"
     read -r mac
     mac="${mac^^}"
     validate_mac "$mac" && break
@@ -427,7 +423,7 @@ collect_node() {
   echo -e "  ${WHT}${BOLD}IP estatica del nodo${NC}"
   echo -e "  ${DIM}    Ej: ${default_ip}  (debe estar libre y dentro de ${MACHINE_CIDR})${NC}"
   while true; do
-    printf "  ${CYN}IP${NC} ${DIM}[Enter = ${default_ip}]${NC}: "
+    echo -n "IP [Enter = ]:"
     read -r ip
     [ -z "$ip" ] && ip="$default_ip"
     validate_ip "$ip" && break
@@ -439,7 +435,7 @@ collect_node() {
   echo ""
   echo -e "  ${WHT}${BOLD}Nombre de la interfaz de red en la VM${NC}"
   echo -e "  ${DIM}    Ej: ens3  (KVM/QEMU)  |  eth0  (generico)  |  ens192 (VMware)${NC}"
-  printf "  ${CYN}Interfaz${NC} ${DIM}[Enter = ens3]${NC}: "
+  echo -n "  Interfaz [Enter = ens3]: "
   read -r iface
   [ -z "$iface" ] && iface="ens3"
 
@@ -471,7 +467,7 @@ echo ""
 step "Prefijo de red (mascara)"
 echo -e "  ${DIM}Para la red ${MACHINE_CIDR} el prefijo es ${MACHINE_CIDR#*/}.${NC}"
 echo -e "  ${DIM}    Ej: /24 = mascara 255.255.255.0${NC}"
-printf "  ${CYN}Prefijo${NC} ${DIM}[Enter = ${MACHINE_CIDR#*/}]${NC}: "
+echo -n "Prefijo [Enter = ]:"
 read -r NET_PREFIX
 [ -z "$NET_PREFIX" ] && NET_PREFIX="${MACHINE_CIDR#*/}"
 
@@ -484,11 +480,11 @@ step "Gateway de la red"
 echo -e "  ${DIM}Router/gateway por defecto de la red ${MACHINE_CIDR}.${NC}"
 echo -e "  ${DIM}    Ej: ${GW_SUGGESTED}${NC}"
 while true; do
-  printf "  ${CYN}Gateway${NC} ${DIM}[Enter = ${GW_SUGGESTED}]${NC}: "
+  echo -n "  Gateway [Enter = ${GW_SUGGESTED}]: "
   read -r GATEWAY
   [ -z "$GATEWAY" ] && GATEWAY="$GW_SUGGESTED"
   validate_ip "$GATEWAY" && break
-  err "IP invalida. Formato: x.x.x.x"
+  echo "  ERROR: IP invalida. Formato: x.x.x.x"
 done
 
 # ── Mostrar DNS a crear ───────────────────────────────────────
@@ -546,7 +542,7 @@ fi
 echo ""
 echo -e "  ${RED}${BOLD}IMPORTANTE:${NC} Crear estos registros ANTES de bootear las VMs con la ISO."
 echo ""
-printf "  Presiona ENTER cuando hayas anotado o creado los registros DNS..."; read -r _
+echo ""; echo -n "  Presiona ENTER cuando hayas anotado los registros DNS..."; read -r _
 
 # ──────────────────────────────────────────────────────────────
 # PASO 5: MIRROR
@@ -591,7 +587,7 @@ fi
 
 REGISTRY_CA=""
 if confirm "El registry usa TLS con certificado propio? (no = HTTP plain, responder N)"; then
-  printf "  ${CYN}Ruta al certificado CA${NC} ${DIM}[Enter = /opt/registry/certs/ca.crt]${NC}: "
+  echo -n "  Ruta al certificado CA [Enter = /opt/registry/certs/ca.crt]: "
   read -r CERT_PATH
   [ -z "$CERT_PATH" ] && CERT_PATH="/opt/registry/certs/ca.crt"
   if [ -f "$CERT_PATH" ]; then
@@ -605,7 +601,7 @@ else
 fi
 
 echo ""
-printf "  Presiona ENTER para continuar..."; read -r _
+echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
 
 # ──────────────────────────────────────────────────────────────
 # PASO 6: RESUMEN Y CONFIRMACION
