@@ -1,16 +1,10 @@
 #!/bin/bash
 # =============================================================
 # 05-generate-cluster-iso.sh
-# Wizard interactivo para generar ISO(s) de instalacion OCP
-# con Agent Based Installer usando el registry local mirror.
-# Soporta: 1 nodo (SNO) o 3 nodos (HA)
+# Wizard para generar ISO de instalacion OCP con Agent Based Installer
 # Uso: bash /root/OC-Mirror/05-generate-cluster-iso.sh
 # =============================================================
 set -euo pipefail
-
-RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'
-BLU='\033[0;34m'; CYN='\033[0;36m'; WHT='\033[1;37m'; NC='\033[0m'
-BOLD='\033[1m'; DIM='\033[2m'
 
 WORK_DIR="/root/OC-Mirror"
 REGISTRY="172.18.194.190:5000"
@@ -18,197 +12,84 @@ PULL_SECRET_FILE="/root/pull-secret.json"
 OCP_VERSION="4.15.0"
 OUTPUT_DIR="${WORK_DIR}/cluster-output"
 
-# ── Helpers de UI ─────────────────────────────────────────────
+# Colores solo para echo -e decorativo, nunca en prompts de read
+R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
+B='\033[0;34m' C='\033[0;36m' W='\033[1;37m' D='\033[2m' N='\033[0m' BOLD='\033[1m'
 
 banner() {
   echo ""
-  printf "${BLU}${BOLD}╔══════════════════════════════════════════════════════════╗\n${NC}"
-  printf "${BLU}${BOLD}║${NC}  ${WHT}${BOLD}%-56s${NC}${BLU}${BOLD}║\n${NC}" "$1"
-  printf "${BLU}${BOLD}╚══════════════════════════════════════════════════════════╝\n${NC}"
+  echo -e "${B}${BOLD}╔══════════════════════════════════════════════════════════╗${N}"
+  echo -e "${B}${BOLD}║  ${W}${BOLD}$1${N}"
+  echo -e "${B}${BOLD}╚══════════════════════════════════════════════════════════╝${N}"
   echo ""
 }
-
-step()  { echo ""; echo -e "${CYN}${BOLD}▶ $1${NC}"; echo ""; }
-ok()    { echo -e "  ${GRN}✓${NC} $1"; }
-warn()  { echo -e "  ${YEL}⚠  $1${NC}"; }
-err()   { echo -e "  ${RED}✗  $1${NC}"; }
-info()  { echo -e "  ${WHT}→${NC} $1"; }
-hint()  { echo -e "  ${DIM}    Ej: $1${NC}"; }
-sep()   { echo -e "  ${DIM}──────────────────────────────────────${NC}"; }
-
-# ask_field "Titulo" "Ejemplo" "Nombre campo" "default"
-ask_field() {
-  local title="$1"
-  local example="$2"
-  local field="$3"
-  local default="${4:-}"
-
-  echo ""
-  echo -e "  ${WHT}${BOLD}${title}${NC}"
-  [ -n "$example" ] && echo -e "  ${DIM}    Ej: ${example}${NC}"
-  echo ""
-  if [ -n "$default" ]; then
-    echo -n "  ${field} [Enter = ${default}]: "
-  else
-    echo -n "  ${field}: "
-  fi
-  read -r _val
-  [ -z "$_val" ] && [ -n "$default" ] && _val="$default"
-  echo "$_val"
-}
-
-confirm() {
-  local msg="$1"
-  echo ""
-  echo -n "  ${msg} [s/N]: "
-  read -r _yn
-  [[ "$_yn" =~ ^[sS]$ ]]
-}
+step()  { echo ""; echo -e "${C}${BOLD}▶ $1${N}"; echo ""; }
+ok()    { echo -e "  ${G}OK${N}  $1"; }
+warn()  { echo -e "  ${Y}WARN${N} $1"; }
+err()   { echo -e "  ${R}ERR${N} $1"; }
+info()  { echo -e "  ->  $1"; }
+ej()    { echo -e "  ${D}    Ej: $1${N}"; }
+sep()   { echo -e "  ${D}  ────────────────────────────────────${N}"; }
+ask_enter() { echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _DUMMY; }
 
 validate_ip() {
-  local ip="$1"
-  if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    IFS='.' read -ra _p <<< "$ip"
-    for p in "${_p[@]}"; do [ "$p" -le 255 ] 2>/dev/null || return 1; done
-    return 0
-  fi
-  return 1
+  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -ra _p <<< "$1"
+  for p in "${_p[@]}"; do [ "$p" -le 255 ] 2>/dev/null || return 1; done
 }
-
-validate_mac() {
-  [[ "${1^^}" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]
-}
-
+validate_mac() { [[ "${1^^}" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; }
 validate_cidr() {
   local ip="${1%/*}" mask="${1#*/}"
   validate_ip "$ip" && [[ "$mask" =~ ^[0-9]+$ ]] && [ "$mask" -ge 0 ] && [ "$mask" -le 32 ]
 }
 
-ask_ip() {
-  local title="$1" example="$2" field="$3" default="${4:-}"
-  local val
-  while true; do
-    val=$(ask_field "$title" "$example" "$field" "$default")
-    validate_ip "$val" && { echo "$val"; return; }
-    echo "  ERROR: IP invalida '$val'  Formato: x.x.x.x  (ej: 172.18.194.10)"
-  done
-}
-
-ask_mac() {
-  local title="$1" field="$2"
-  local val
-  while true; do
-    val=$(ask_field "$title" "AA:BB:CC:DD:EE:FF" "$field" "")
-    val="${val^^}"
-    validate_mac "$val" && { echo "$val"; return; }
-    echo "  ERROR: MAC invalida '$val'  Formato: AA:BB:CC:DD:EE:FF"
-  done
-}
-
-ask_cidr() {
-  local title="$1" example="$2" field="$3" default="${4:-}"
-  local val
-  while true; do
-    val=$(ask_field "$title" "$example" "$field" "$default")
-    validate_cidr "$val" && { echo "$val"; return; }
-    echo "  ERROR: CIDR invalido '$val'  Formato: x.x.x.x/nn  (ej: 172.18.194.0/24)"
-  done
-}
-
-# ──────────────────────────────────────────────────────────────
-# INICIO
 # ──────────────────────────────────────────────────────────────
 clear
 echo ""
-echo -e "${RED}${BOLD}"
-echo "   ██████╗  ██████╗██████╗     ██╗    ██╗██╗███████╗ █████╗ ██████╗ ██████╗ "
-echo "   ██╔═══██╗██╔════╝██╔══██╗   ██║    ██║██║╚══███╔╝██╔══██╗██╔══██╗██╔══██╗"
-echo "   ██║   ██║██║     ██████╔╝   ██║ █╗ ██║██║  ███╔╝ ███████║██████╔╝██║  ██║"
-echo "   ██║   ██║██║     ██╔═══╝    ██║███╗██║██║ ███╔╝  ██╔══██║██╔══██╗██║  ██║"
-echo "   ╚██████╔╝╚██████╗██║        ╚███╔███╔╝██║███████╗██║  ██║██║  ██║██████╔╝"
-echo "    ╚═════╝  ╚═════╝╚═╝         ╚══╝╚══╝ ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝"
-echo -e "${NC}"
-echo -e "  ${WHT}${BOLD}Generador de ISO — Agent Based Installer — OCP ${OCP_VERSION}${NC}"
-echo -e "  ${CYN}Registry local: http://${REGISTRY}${NC}"
-echo ""
-echo -e "  ${DIM}Este wizard genera install-config.yaml, agent-config.yaml${NC}"
-echo -e "  ${DIM}y la ISO de instalacion para clusters de 1 nodo (SNO) o 3 nodos (HA).${NC}"
-echo -e "  ${DIM}En cada pregunta se muestra un EJEMPLO. Presiona Enter para aceptar el valor sugerido.${NC}"
+echo -e "${R}${BOLD}  OCP Wizard — Agent Based Installer — ${OCP_VERSION}${N}"
+echo -e "${C}  Registry: http://${REGISTRY}${N}"
 echo ""
 
 # ──────────────────────────────────────────────────────────────
-# PASO 1: PREREQUISITOS
+# PASO 1 — PREREQUISITOS
 # ──────────────────────────────────────────────────────────────
 banner "PASO 1 de 7 — Verificando prerequisitos"
-
 PREREQ_OK=true
 
-step "Verificando herramientas y servicios..."
+command -v openshift-install &>/dev/null \
+  && ok "openshift-install: $(openshift-install version 2>/dev/null | head -1)" \
+  || { err "openshift-install no encontrado"; PREREQ_OK=false; }
 
-if command -v openshift-install &>/dev/null; then
-  ok "openshift-install: $(openshift-install version 2>/dev/null | head -1)"
-else
-  err "openshift-install no encontrado en PATH"
-  info "Instalarlo: tar xzf openshift-install-linux.tar.gz && mv openshift-install /usr/local/bin/"
-  PREREQ_OK=false
-fi
+[ -f "$PULL_SECRET_FILE" ] \
+  && ok "Pull secret: $PULL_SECRET_FILE" \
+  || { err "No se encontro $PULL_SECRET_FILE"; PREREQ_OK=false; }
 
-if command -v oc &>/dev/null; then
-  ok "oc CLI: $(oc version --client 2>/dev/null | head -1)"
-else
-  warn "oc no encontrado — no es critico para generar la ISO"
-fi
-
-if [ -f "$PULL_SECRET_FILE" ]; then
-  ok "Pull secret: $PULL_SECRET_FILE"
-else
-  err "No se encontro $PULL_SECRET_FILE"
-  info "Descargarlo en: https://console.redhat.com/openshift/install/pull-secret"
-  PREREQ_OK=false
-fi
-
-if curl -s --max-time 5 "http://${REGISTRY}/v2/" | grep -q "{}"; then
-  REPO_COUNT=$(curl -s "http://${REGISTRY}/v2/_catalog" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('repositories',[])))" 2>/dev/null || echo "?")
-  ok "Registry local: http://${REGISTRY} — ${REPO_COUNT} repositorios"
-else
-  err "Registry local no responde en http://${REGISTRY}/v2/"
-  warn "Verificar: podman ps | grep local-registry"
-  PREREQ_OK=false
-fi
+curl -s --max-time 5 "http://${REGISTRY}/v2/" | grep -q "{}" \
+  && ok "Registry: http://${REGISTRY}" \
+  || { err "Registry no responde en http://${REGISTRY}"; PREREQ_OK=false; }
 
 ICSP_FILE=$(find "${WORK_DIR}/oc-mirror-workspace" -name "imageContentSourcePolicy*.yaml" 2>/dev/null | sort | tail -1)
 [ -z "$ICSP_FILE" ] && ICSP_FILE=$(find "${WORK_DIR}" -name "mirror-config-para-UI.yaml" 2>/dev/null | head -1)
-if [ -n "$ICSP_FILE" ]; then
-  ok "ICSP encontrado: $ICSP_FILE"
-else
-  warn "No se encontro ICSP. Ejecutar primero: bash ${WORK_DIR}/02-run-mirror.sh"
-fi
+[ -n "$ICSP_FILE" ] && ok "ICSP: $ICSP_FILE" || warn "Sin ICSP — ejecutar 02-run-mirror.sh primero"
 
-if [ "$PREREQ_OK" = false ]; then
-  echo ""
-  err "Hay prerequisitos faltantes. Resolver antes de continuar."
-  exit 1
-fi
-
-echo ""
-ok "Todos los prerequisitos OK"
-echo ""
-echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
+[ "$PREREQ_OK" = false ] && { echo ""; err "Prerequisitos faltantes. Resolver antes de continuar."; exit 1; }
+echo ""; ok "Todo OK"
+ask_enter
 
 # ──────────────────────────────────────────────────────────────
-# PASO 2: TOPOLOGIA
+# PASO 2 — TOPOLOGIA
 # ──────────────────────────────────────────────────────────────
 banner "PASO 2 de 7 — Topologia del Cluster"
 
-echo -e "  ${WHT}${BOLD}Selecciona el tipo de cluster:${NC}"
+echo -e "  ${W}${BOLD}Tipo de cluster:${N}"
 echo ""
-echo -e "  ${YEL}1)${NC} ${BOLD}SNO — Single Node OpenShift${NC}"
-echo -e "       1 VM que cumple los roles de etcd + control plane + worker"
-echo -e "       ${DIM}Ideal para labs, desarrollo o recursos limitados${NC}"
+echo "  1)  SNO — Single Node OpenShift"
+echo "        1 VM: etcd + control plane + worker"
+echo "        Ideal para labs, desarrollo, recursos limitados"
 echo ""
-echo -e "  ${YEL}3)${NC} ${BOLD}HA — High Availability${NC}"
-echo -e "       3 VMs, cada una es control plane + etcd"
-echo -e "       ${DIM}Produccion. Cada nodo tambien puede schedulear workloads${NC}"
+echo "  3)  HA — High Availability"
+echo "        3 VMs: control plane + etcd en cada una"
+echo "        Produccion. Los nodos tambien schedulean workloads"
 echo ""
 
 while true; do
@@ -217,175 +98,198 @@ while true; do
   case "$NODE_COUNT" in
     1) CLUSTER_TYPE="SNO"; break ;;
     3) CLUSTER_TYPE="HA";  break ;;
-    *) err "Ingresar 1 o 3" ;;
+    *) echo "  -> Ingresar 1 o 3" ;;
   esac
 done
 
 echo ""
-ok "Topologia: ${BOLD}${CLUSTER_TYPE}${NC} — ${NODE_COUNT} nodo(s)"
-if [ "$NODE_COUNT" -eq 1 ]; then
-  info "Una sola ISO. La VM se configura sola al bootear."
-else
-  info "Una sola ISO para las 3 VMs. Cada VM se identifica por su MAC address."
-fi
-echo ""
-echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
+ok "Topologia: ${CLUSTER_TYPE} — ${NODE_COUNT} nodo(s)"
+[ "$NODE_COUNT" -eq 1 ] \
+  && info "Una sola ISO. La VM se configura sola al bootear." \
+  || info "Una sola ISO para las 3 VMs. Cada una se identifica por MAC address."
+ask_enter
 
 # ──────────────────────────────────────────────────────────────
-# PASO 3: DATOS DEL CLUSTER
+# PASO 3 — DATOS DEL CLUSTER
 # ──────────────────────────────────────────────────────────────
 banner "PASO 3 de 7 — Datos del Cluster"
 
 # ── Nombre y dominio ──────────────────────────────────────────
 step "Identificacion del cluster"
-echo -e "  ${DIM}El nombre del cluster y el dominio base forman el FQDN del cluster.${NC}"
-echo -e "  ${DIM}Ejemplo: cluster 'ocp-upstream' + dominio 'metrotel.xdc'${NC}"
-echo -e "  ${DIM}  -> API:    api.ocp-upstream.metrotel.xdc${NC}"
-echo -e "  ${DIM}  -> Apps:   *.apps.ocp-upstream.metrotel.xdc${NC}"
+echo "  El nombre + dominio forman el FQDN completo del cluster."
+echo ""
+ej "Nombre: ocp-upstream   Dominio: metrotel.xdc"
+ej "  -> API:   api.ocp-upstream.metrotel.xdc"
+ej "  -> Apps:  *.apps.ocp-upstream.metrotel.xdc"
 sep
-
-CLUSTER_NAME=$(ask_field \
-  "Nombre del cluster" \
-  "ocp-upstream" \
-  "Nombre" \
-  "ocp-upstream")
-
-BASE_DOMAIN=$(ask_field \
-  "Dominio base de la organizacion" \
-  "metrotel.xdc" \
-  "Dominio" \
-  "metrotel.xdc")
 
 echo ""
-ok "FQDN del cluster: ${BOLD}${CLUSTER_NAME}.${BASE_DOMAIN}${NC}"
-info "API:   api.${CLUSTER_NAME}.${BASE_DOMAIN}"
-info "Apps:  *.apps.${CLUSTER_NAME}.${BASE_DOMAIN}"
+echo "  Nombre del cluster:"
+ej "ocp-upstream  /  ocp-prod  /  openshift-xdc"
+echo -n "  Nombre: "
+read -r CLUSTER_NAME
+[ -z "$CLUSTER_NAME" ] && CLUSTER_NAME="ocp-upstream"
 
-# ── CIDRs ─────────────────────────────────────────────────────
+echo ""
+echo "  Dominio base de la organizacion:"
+ej "metrotel.xdc  /  empresa.local  /  corp.net"
+echo -n "  Dominio: "
+read -r BASE_DOMAIN
+[ -z "$BASE_DOMAIN" ] && BASE_DOMAIN="metrotel.xdc"
+
+echo ""
+ok "Cluster: ${CLUSTER_NAME}.${BASE_DOMAIN}"
+info "API:  api.${CLUSTER_NAME}.${BASE_DOMAIN}"
+info "Apps: *.apps.${CLUSTER_NAME}.${BASE_DOMAIN}"
+
+# ── Redes ─────────────────────────────────────────────────────
 step "Redes del cluster"
-echo -e "  ${DIM}Machine CIDR: red donde viven las VMs (tu red de infraestructura).${NC}"
-echo -e "  ${DIM}Cluster Net:  red interna de pods (no debe superponerse con la red de VMs).${NC}"
-echo -e "  ${DIM}Service Net:  red interna de servicios Kubernetes.${NC}"
+echo "  Machine CIDR: red donde viven las VMs."
+echo "  Cluster Net:  red interna de pods (no debe superponerse con la de VMs)."
+echo "  Service Net:  red interna de servicios Kubernetes."
 sep
 
-MACHINE_CIDR=$(ask_cidr \
-  "Red de las VMs (machine network)" \
-  "172.18.194.0/24" \
-  "Machine CIDR" \
-  "172.18.194.0/24")
+echo ""
+echo "  Red de las VMs (machine network):"
+ej "172.18.194.0/24"
+echo -n "  Machine CIDR [Enter = 172.18.194.0/24]: "
+read -r MACHINE_CIDR
+[ -z "$MACHINE_CIDR" ] && MACHINE_CIDR="172.18.194.0/24"
+while ! validate_cidr "$MACHINE_CIDR"; do
+  echo "  ERROR: CIDR invalido. Formato: x.x.x.x/nn"
+  echo -n "  Machine CIDR: "
+  read -r MACHINE_CIDR
+done
 
-CLUSTER_NET=$(ask_cidr \
-  "Red interna de pods" \
-  "10.128.0.0/14" \
-  "Cluster Network" \
-  "10.128.0.0/14")
+echo ""
+echo "  Red interna de pods:"
+ej "10.128.0.0/14"
+echo -n "  Cluster Network [Enter = 10.128.0.0/14]: "
+read -r CLUSTER_NET
+[ -z "$CLUSTER_NET" ] && CLUSTER_NET="10.128.0.0/14"
 
-SERVICE_NET=$(ask_cidr \
-  "Red interna de servicios Kubernetes" \
-  "172.30.0.0/16" \
-  "Service Network" \
-  "172.30.0.0/16")
+echo ""
+echo "  Red interna de servicios:"
+ej "172.30.0.0/16"
+echo -n "  Service Network [Enter = 172.30.0.0/16]: "
+read -r SERVICE_NET
+[ -z "$SERVICE_NET" ] && SERVICE_NET="172.30.0.0/16"
 
-# ── VIPs ──────────────────────────────────────────────────────
+# ── VIPs para HA ──────────────────────────────────────────────
 if [ "$NODE_COUNT" -eq 3 ]; then
   step "VIPs — IPs Virtuales del cluster"
-  echo -e "  ${DIM}Los VIPs son IPs flotantes que NO deben estar asignadas a ninguna VM.${NC}"
-  echo -e "  ${DIM}Deben estar libres dentro del rango de ${MACHINE_CIDR}.${NC}"
-  echo -e "  ${DIM}El API VIP recibe las conexiones a la API de Kubernetes.${NC}"
-  echo -e "  ${DIM}El Ingress VIP recibe el trafico de las aplicaciones (*.apps.*).${NC}"
+  echo "  IPs flotantes que NO deben estar asignadas a ninguna VM."
+  echo "  Deben estar libres dentro de ${MACHINE_CIDR}."
   sep
 
-  API_VIP=$(ask_ip \
-    "VIP para la API del cluster" \
-    "172.18.194.100  (debe estar libre, no usada por ninguna VM)" \
-    "API VIP" \
-    "172.18.194.100")
+  echo ""
+  echo "  VIP para la API de Kubernetes:"
+  ej "172.18.194.100  (libre, no usada por ninguna VM)"
+  echo -n "  API VIP [Enter = 172.18.194.100]: "
+  read -r API_VIP
+  [ -z "$API_VIP" ] && API_VIP="172.18.194.100"
+  while ! validate_ip "$API_VIP"; do
+    echo "  ERROR: IP invalida."
+    echo -n "  API VIP: "
+    read -r API_VIP
+  done
 
-  INGRESS_VIP=$(ask_ip \
-    "VIP para el Ingress / Apps" \
-    "172.18.194.101  (debe estar libre, diferente al API VIP)" \
-    "Ingress VIP" \
-    "172.18.194.101")
-
-  ok "API VIP:    ${API_VIP}"
-  ok "Ingress VIP: ${INGRESS_VIP}"
+  echo ""
+  echo "  VIP para el Ingress / Apps:"
+  ej "172.18.194.101  (libre, diferente al API VIP)"
+  echo -n "  Ingress VIP [Enter = 172.18.194.101]: "
+  read -r INGRESS_VIP
+  [ -z "$INGRESS_VIP" ] && INGRESS_VIP="172.18.194.101"
+  while ! validate_ip "$INGRESS_VIP"; do
+    echo "  ERROR: IP invalida."
+    echo -n "  Ingress VIP: "
+    read -r INGRESS_VIP
+  done
 fi
 
 # ── DNS ───────────────────────────────────────────────────────
 step "Servidores DNS"
-echo -e "  ${DIM}Las VMs usaran estos DNS durante y despues de la instalacion.${NC}"
-echo -e "  ${DIM}El DNS primario debe poder resolver los nombres del cluster${NC}"
-echo -e "  ${DIM}(api.* y *.apps.*) que configuraremos mas adelante.${NC}"
+echo "  Las VMs usaran estos DNS durante y despues de la instalacion."
+echo "  El DNS primario debe resolver api.* y *.apps.* del cluster."
 sep
 
-DNS_PRIMARY=$(ask_ip \
-  "Servidor DNS primario" \
-  "172.18.194.36" \
-  "DNS primario" \
-  "172.18.194.36")
+echo ""
+echo "  DNS primario:"
+ej "172.18.194.36"
+echo -n "  DNS primario [Enter = 172.18.194.36]: "
+read -r DNS_PRIMARY
+[ -z "$DNS_PRIMARY" ] && DNS_PRIMARY="172.18.194.36"
+while ! validate_ip "$DNS_PRIMARY"; do
+  echo "  ERROR: IP invalida."
+  echo -n "  DNS primario: "
+  read -r DNS_PRIMARY
+done
 
-DNS_SECONDARY=$(ask_ip \
-  "Servidor DNS secundario (opcional, Enter para omitir)" \
-  "172.18.194.37" \
-  "DNS secundario" \
-  "172.18.194.37")
-DNS_SERVER="$DNS_PRIMARY"
+echo ""
+echo "  DNS secundario:"
+ej "172.18.194.37"
+echo -n "  DNS secundario [Enter = 172.18.194.37]: "
+read -r DNS_SECONDARY
+[ -z "$DNS_SECONDARY" ] && DNS_SECONDARY="172.18.194.37"
 
 # ── NTP ───────────────────────────────────────────────────────
 step "Servidores NTP"
-echo -e "  ${DIM}Los nodos del cluster necesitan sincronizacion de tiempo.${NC}"
-echo -e "  ${DIM}Usar el mismo NTP que el resto de la infraestructura.${NC}"
+echo "  Los nodos necesitan sincronizacion de tiempo."
+echo "  Usar el mismo NTP de la infraestructura."
 sep
 
-NTP_PRIMARY=$(ask_field \
-  "Servidor NTP primario" \
-  "172.18.194.36" \
-  "NTP primario" \
-  "172.18.194.36")
+echo ""
+echo "  NTP primario:"
+ej "172.18.194.36"
+echo -n "  NTP primario [Enter = 172.18.194.36]: "
+read -r NTP_PRIMARY
+[ -z "$NTP_PRIMARY" ] && NTP_PRIMARY="172.18.194.36"
 
-NTP_SECONDARY=$(ask_field \
-  "Servidor NTP secundario (opcional)" \
-  "172.18.194.37" \
-  "NTP secundario" \
-  "172.18.194.37")
+echo ""
+echo "  NTP secundario:"
+ej "172.18.194.37"
+echo -n "  NTP secundario [Enter = 172.18.194.37]: "
+read -r NTP_SECONDARY
+[ -z "$NTP_SECONDARY" ] && NTP_SECONDARY="172.18.194.37"
 
 # ── SSH Key ───────────────────────────────────────────────────
 step "Clave SSH para acceso a los nodos"
-echo -e "  ${DIM}Esta clave SSH publica se inyecta en todos los nodos del cluster.${NC}"
-echo -e "  ${DIM}Permite hacer 'ssh core@IP_DEL_NODO' para debug si es necesario.${NC}"
+echo "  Se inyecta en todos los nodos. Permite 'ssh core@IP' para debug."
 sep
+echo ""
 
 if [ -f ~/.ssh/id_rsa.pub ]; then
-  info "Clave encontrada en ~/.ssh/id_rsa.pub"
-  echo -e "  ${DIM}$(cat ~/.ssh/id_rsa.pub | cut -c1-60)...${NC}"
-  echo ""
-  if confirm "Usar esta clave SSH?"; then
-    SSH_KEY=$(cat ~/.ssh/id_rsa.pub)
-    ok "Usando clave de ~/.ssh/id_rsa.pub"
-  else
+  ok "Clave encontrada en ~/.ssh/id_rsa.pub"
+  echo -n "  Usar esta clave? [S/n]: "
+  read -r _yn
+  if [[ "$_yn" =~ ^[nN]$ ]]; then
     echo ""
-    echo -n "  Clave SSH publica: "
+    echo "  Pegar clave SSH publica completa:"
+    echo -n "  SSH Key: "
     read -r SSH_KEY
+  else
+    SSH_KEY=$(cat ~/.ssh/id_rsa.pub)
+    ok "Usando ~/.ssh/id_rsa.pub"
   fi
 else
   warn "No se encontro ~/.ssh/id_rsa.pub"
-  info "Para generar una: ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ''"
+  info "Para generar: ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ''"
   echo ""
-  echo -n "  Clave SSH publica (pegar aqui o Enter para omitir): "
+  echo "  Pegar clave SSH publica (o Enter para omitir):"
+  echo -n "  SSH Key: "
   read -r SSH_KEY
 fi
 
-echo ""
-echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
+ask_enter
 
 # ──────────────────────────────────────────────────────────────
-# PASO 4: NODOS
+# PASO 4 — NODOS
 # ──────────────────────────────────────────────────────────────
 banner "PASO 4 de 7 — Configuracion de los Nodos"
 
-echo -e "  ${DIM}Por cada VM necesitamos su MAC address, IP fija y la interfaz de red.${NC}"
-echo -e "  ${DIM}La MAC address identifica cada VM de forma unica para asignarle hostname,${NC}"
-echo -e "  ${DIM}IP y rol durante la instalacion.${NC}"
+echo "  Por cada VM necesitamos MAC address, IP fija e interfaz de red."
+echo "  La MAC identifica cada VM para asignarle hostname, IP y rol."
+echo ""
 
 declare -a NODE_NAMES=()
 declare -a NODE_MACS=()
@@ -393,163 +297,135 @@ declare -a NODE_IPS=()
 declare -a NODE_IFACES=()
 declare -a NODE_ROLES=()
 
-collect_node() {
-  local idx=$1
-  local name
-  [ "$NODE_COUNT" -eq 1 ] && name="master-0" || name="master-${idx}"
+# Calcular primer octeto del CIDR para sugerir IPs
+IFS='.' read -ra _NET <<< "${MACHINE_CIDR%/*}"
+NET_BASE="${_NET[0]}.${_NET[1]}.${_NET[2]}"
+
+for IDX in $(seq 0 $((NODE_COUNT-1))); do
+  [ "$NODE_COUNT" -eq 1 ] && NNAME="master-0" || NNAME="master-${IDX}"
 
   echo ""
-  echo -e "  ${YEL}${BOLD}── Nodo $((idx+1)) de ${NODE_COUNT}: ${name} ──${NC}"
+  echo -e "  ${Y}${BOLD}── Nodo $((IDX+1)) de ${NODE_COUNT}: ${NNAME} ──${N}"
   echo ""
 
   # MAC
-  local mac
-  echo -e "  ${WHT}${BOLD}MAC address de la VM${NC}"
-  echo -e "  ${DIM}    Ej: 52:54:00:AB:CD:$((10+idx*11)):$((idx+1))  (obtenla en el hipervisor)${NC}"
+  echo "  MAC address de la VM ${NNAME}:"
+  echo "    -> Obtenerla en el hipervisor (virt-manager, vSphere, Proxmox, etc.)"
+  ej "52:54:00:AB:CD:0${IDX}"
   while true; do
-    echo -n "MAC:"
-    read -r mac
-    mac="${mac^^}"
-    validate_mac "$mac" && break
-    err "MAC invalida. Formato requerido: AA:BB:CC:DD:EE:FF"
+    echo -n "  MAC: "
+    read -r _MAC
+    _MAC="${_MAC^^}"
+    validate_mac "$_MAC" && break
+    echo "  ERROR: MAC invalida. Formato: AA:BB:CC:DD:EE:FF  (letras mayusculas o minusculas)"
   done
+  NODE_MACS+=("$_MAC")
 
   # IP
-  local default_ip
-  IFS='.' read -ra _net <<< "${MACHINE_CIDR%/*}"
-  default_ip="${_net[0]}.${_net[1]}.${_net[2]}.$((10+idx))"
-  local ip
+  _DEFAULT_IP="${NET_BASE}.$((10+IDX))"
   echo ""
-  echo -e "  ${WHT}${BOLD}IP estatica del nodo${NC}"
-  echo -e "  ${DIM}    Ej: ${default_ip}  (debe estar libre y dentro de ${MACHINE_CIDR})${NC}"
+  echo "  IP estatica del nodo ${NNAME}:"
+  ej "${_DEFAULT_IP}  (libre dentro de ${MACHINE_CIDR})"
   while true; do
-    echo -n "IP [Enter = ]:"
-    read -r ip
-    [ -z "$ip" ] && ip="$default_ip"
-    validate_ip "$ip" && break
-    err "IP invalida. Formato: x.x.x.x"
+    echo -n "  IP [Enter = ${_DEFAULT_IP}]: "
+    read -r _IP
+    [ -z "$_IP" ] && _IP="$_DEFAULT_IP"
+    validate_ip "$_IP" && break
+    echo "  ERROR: IP invalida. Formato: x.x.x.x"
   done
+  NODE_IPS+=("$_IP")
 
   # Interfaz
-  local iface
   echo ""
-  echo -e "  ${WHT}${BOLD}Nombre de la interfaz de red en la VM${NC}"
-  echo -e "  ${DIM}    Ej: ens3  (KVM/QEMU)  |  eth0  (generico)  |  ens192 (VMware)${NC}"
+  echo "  Nombre de la interfaz de red dentro de la VM:"
+  ej "ens3  (KVM/QEMU)   eth0  (generico)   ens192  (VMware)"
   echo -n "  Interfaz [Enter = ens3]: "
-  read -r iface
-  [ -z "$iface" ] && iface="ens3"
+  read -r _IFACE
+  [ -z "$_IFACE" ] && _IFACE="ens3"
+  NODE_IFACES+=("$_IFACE")
 
-  NODE_NAMES+=("$name")
-  NODE_MACS+=("$mac")
-  NODE_IPS+=("$ip")
-  NODE_IFACES+=("$iface")
+  NODE_NAMES+=("$NNAME")
   NODE_ROLES+=("master")
 
   echo ""
-  ok "Nodo ${name} configurado"
-  info "MAC:      ${mac}"
-  info "IP:       ${ip}"
-  info "Interfaz: ${iface}"
-  info "Rol:      master (etcd + control-plane + worker)"
-}
+  ok "Nodo ${NNAME}: MAC=${_MAC}  IP=${_IP}  iface=${_IFACE}"
+done
 
+# SNO: VIPs = IP del nodo
 if [ "$NODE_COUNT" -eq 1 ]; then
-  collect_node 0
   API_VIP="${NODE_IPS[0]}"
   INGRESS_VIP="${NODE_IPS[0]}"
   info "SNO: API VIP e Ingress VIP = ${API_VIP}"
-else
-  for i in 0 1 2; do collect_node "$i"; done
 fi
 
-# ── Prefijo de red ────────────────────────────────────────────
-echo ""
-step "Prefijo de red (mascara)"
-echo -e "  ${DIM}Para la red ${MACHINE_CIDR} el prefijo es ${MACHINE_CIDR#*/}.${NC}"
-echo -e "  ${DIM}    Ej: /24 = mascara 255.255.255.0${NC}"
-echo -n "Prefijo [Enter = ]:"
-read -r NET_PREFIX
-[ -z "$NET_PREFIX" ] && NET_PREFIX="${MACHINE_CIDR#*/}"
-
-# Calcular gateway sugerido
-IFS='.' read -ra _gw <<< "${MACHINE_CIDR%/*}"
-GW_SUGGESTED="${_gw[0]}.${_gw[1]}.${_gw[2]}.1"
-
-echo ""
-step "Gateway de la red"
-echo -e "  ${DIM}Router/gateway por defecto de la red ${MACHINE_CIDR}.${NC}"
-echo -e "  ${DIM}    Ej: ${GW_SUGGESTED}${NC}"
+# Gateway
+step "Gateway y prefijo de red"
+GW_DEFAULT="${NET_BASE}.1"
+echo "  Gateway por defecto de la red ${MACHINE_CIDR}:"
+ej "${GW_DEFAULT}"
 while true; do
-  echo -n "  Gateway [Enter = ${GW_SUGGESTED}]: "
+  echo -n "  Gateway [Enter = ${GW_DEFAULT}]: "
   read -r GATEWAY
-  [ -z "$GATEWAY" ] && GATEWAY="$GW_SUGGESTED"
+  [ -z "$GATEWAY" ] && GATEWAY="$GW_DEFAULT"
   validate_ip "$GATEWAY" && break
-  echo "  ERROR: IP invalida. Formato: x.x.x.x"
+  echo "  ERROR: IP invalida."
 done
+
+NET_PREFIX="${MACHINE_CIDR#*/}"
+echo ""
+info "Prefijo de red: /${NET_PREFIX}  (tomado de ${MACHINE_CIDR})"
 
 # ── Mostrar DNS a crear ───────────────────────────────────────
 echo ""
-echo -e "  ${YEL}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "  ${YEL}${BOLD}║      REGISTROS DNS QUE DEBES CREAR ANTES DE BOOTEAR     ║${NC}"
-echo -e "  ${YEL}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
+echo -e "  ${Y}${BOLD}╔══════════════════════════════════════════════════════════╗${N}"
+echo -e "  ${Y}${BOLD}║    REGISTROS DNS QUE DEBES CREAR ANTES DE BOOTEAR       ║${N}"
+echo -e "  ${Y}${BOLD}╚══════════════════════════════════════════════════════════╝${N}"
 echo ""
-echo -e "  Servidor DNS: ${WHT}${DNS_PRIMARY}${NC}"
+echo "  Servidor DNS: ${DNS_PRIMARY}"
 echo ""
 
 if [ "$NODE_COUNT" -eq 1 ]; then
-  echo -e "  ${GRN}# API y Ingress (SNO: misma IP para todo)${NC}"
-  echo -e "  ${BOLD}api.${CLUSTER_NAME}.${BASE_DOMAIN}.          IN A  ${API_VIP}${NC}"
-  echo -e "  ${BOLD}api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.      IN A  ${API_VIP}${NC}"
-  echo -e "  ${BOLD}*.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.       IN A  ${INGRESS_VIP}${NC}"
-  echo -e "  ${BOLD}master-0.${CLUSTER_NAME}.${BASE_DOMAIN}.     IN A  ${NODE_IPS[0]}${NC}"
+  echo "  # API e Ingress (SNO: misma IP para todo)"
+  echo "  api.${CLUSTER_NAME}.${BASE_DOMAIN}.          IN A  ${API_VIP}"
+  echo "  api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.      IN A  ${API_VIP}"
+  echo "  *.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.       IN A  ${INGRESS_VIP}"
+  echo "  master-0.${CLUSTER_NAME}.${BASE_DOMAIN}.     IN A  ${NODE_IPS[0]}"
   echo ""
-  echo -e "  ${GRN}# DNS inverso (PTR)${NC}"
-  IFS='.' read -ra _o <<< "${API_VIP}"
-  echo -e "  ${BOLD}${_o[3]}.${_o[2]}.${_o[1]}.${_o[0]}.in-addr.arpa.  IN PTR  api.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
-  echo ""
-  echo -e "  ${GRN}# /etc/hosts alternativo en este servidor:${NC}"
-  echo -e "  ${CYN}echo '${API_VIP}  api.${CLUSTER_NAME}.${BASE_DOMAIN} api-int.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
-  echo -e "  ${CYN}echo '${API_VIP}  console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
-  echo -e "  ${CYN}echo '${API_VIP}  oauth-openshift.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+  echo "  # /etc/hosts alternativo en este servidor:"
+  echo "  echo '${API_VIP}  api.${CLUSTER_NAME}.${BASE_DOMAIN} api-int.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts"
+  echo "  echo '${API_VIP}  console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts"
+  echo "  echo '${API_VIP}  oauth-openshift.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts"
 else
-  echo -e "  ${GRN}# API e Ingress${NC}"
-  echo -e "  ${BOLD}api.${CLUSTER_NAME}.${BASE_DOMAIN}.          IN A  ${API_VIP}${NC}"
-  echo -e "  ${BOLD}api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.      IN A  ${API_VIP}${NC}"
-  echo -e "  ${BOLD}*.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.       IN A  ${INGRESS_VIP}${NC}"
+  echo "  # API e Ingress"
+  echo "  api.${CLUSTER_NAME}.${BASE_DOMAIN}.          IN A  ${API_VIP}"
+  echo "  api-int.${CLUSTER_NAME}.${BASE_DOMAIN}.      IN A  ${API_VIP}"
+  echo "  *.apps.${CLUSTER_NAME}.${BASE_DOMAIN}.       IN A  ${INGRESS_VIP}"
   echo ""
-  echo -e "  ${GRN}# Un registro A por nodo${NC}"
+  echo "  # Un A por nodo"
   for i in "${!NODE_NAMES[@]}"; do
-    echo -e "  ${BOLD}${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN A  ${NODE_IPS[$i]}${NC}"
+    echo "  ${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN A  ${NODE_IPS[$i]}"
   done
   echo ""
-  echo -e "  ${GRN}# DNS inverso (PTR)${NC}"
-  IFS='.' read -ra _o <<< "${API_VIP}"; echo -e "  ${BOLD}${_o[3]}.${_o[2]}.${_o[1]}.${_o[0]}.in-addr.arpa.  IN PTR  api.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+  echo "  # SRV records etcd (requeridos en HA)"
   for i in "${!NODE_NAMES[@]}"; do
-    IFS='.' read -ra _o <<< "${NODE_IPS[$i]}"
-    echo -e "  ${BOLD}${_o[3]}.${_o[2]}.${_o[1]}.${_o[0]}.in-addr.arpa.  IN PTR  ${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
+    echo "  _etcd-server-ssl._tcp.${CLUSTER_NAME}.${BASE_DOMAIN}. IN SRV 0 10 2380 ${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}."
   done
   echo ""
-  echo -e "  ${GRN}# SRV records para etcd (requeridos en HA)${NC}"
-  for i in "${!NODE_NAMES[@]}"; do
-    echo -e "  ${BOLD}_etcd-server-ssl._tcp.${CLUSTER_NAME}.${BASE_DOMAIN}.  IN SRV  0 10 2380 ${NODE_NAMES[$i]}.${CLUSTER_NAME}.${BASE_DOMAIN}.${NC}"
-  done
-  echo ""
-  echo -e "  ${GRN}# /etc/hosts alternativo en este servidor:${NC}"
-  echo -e "  ${CYN}echo '${API_VIP}     api.${CLUSTER_NAME}.${BASE_DOMAIN} api-int.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
-  echo -e "  ${CYN}echo '${INGRESS_VIP} console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
-  echo -e "  ${CYN}echo '${INGRESS_VIP} oauth-openshift.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts${NC}"
+  echo "  # /etc/hosts alternativo:"
+  echo "  echo '${API_VIP}     api.${CLUSTER_NAME}.${BASE_DOMAIN} api-int.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts"
+  echo "  echo '${INGRESS_VIP} console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts"
+  echo "  echo '${INGRESS_VIP} oauth-openshift.apps.${CLUSTER_NAME}.${BASE_DOMAIN}' >> /etc/hosts"
 fi
 echo ""
-echo -e "  ${RED}${BOLD}IMPORTANTE:${NC} Crear estos registros ANTES de bootear las VMs con la ISO."
+echo "  IMPORTANTE: Crear estos registros ANTES de bootear las VMs."
 echo ""
-echo ""; echo -n "  Presiona ENTER cuando hayas anotado los registros DNS..."; read -r _
+echo -n "  Presiona ENTER cuando hayas anotado los registros DNS..."; read -r _DUMMY
 
 # ──────────────────────────────────────────────────────────────
-# PASO 5: MIRROR
+# PASO 5 — MIRROR
 # ──────────────────────────────────────────────────────────────
 banner "PASO 5 de 7 — Configuracion del Registry Mirror"
 
-step "Registry local"
 info "Registry: http://${REGISTRY}"
 info "Las imagenes de OCP se sirven desde el registry local."
 info "El cluster NO necesitara acceso a internet."
@@ -558,23 +434,20 @@ echo ""
 MIRROR_REGISTRIES=""
 if [ -n "$ICSP_FILE" ] && [ -f "$ICSP_FILE" ]; then
   ok "ICSP: $ICSP_FILE"
-  MIRROR_REGISTRIES=$(python3 << PYEOF
+  MIRROR_REGISTRIES=$(python3 -c "
 import yaml
-try:
-    with open("${ICSP_FILE}") as f:
-        doc = yaml.safe_load(f)
-    entries = doc.get("spec", {}).get("repositoryDigestMirrors", [])
-    lines = []
-    for e in entries:
-        src = e.get("source",""); mirrors = e.get("mirrors",[])
-        if src and mirrors:
-            lines.append(f"  - source: {src}\n    mirrors:")
-            for m in mirrors: lines.append(f"    - {m}")
-    print('\n'.join(lines))
-except Exception as ex:
-    print(f"  # Error: {ex}")
-PYEOF
-)
+with open('${ICSP_FILE}') as f:
+    doc = yaml.safe_load(f)
+entries = doc.get('spec', {}).get('repositoryDigestMirrors', [])
+lines = []
+for e in entries:
+    src = e.get('source',''); mirrors = e.get('mirrors',[])
+    if src and mirrors:
+        lines.append('  - source: ' + src)
+        lines.append('    mirrors:')
+        for m in mirrors: lines.append('    - ' + m)
+print('\n'.join(lines))
+" 2>/dev/null || echo "")
 else
   warn "Sin ICSP — usando configuracion generica"
   MIRROR_REGISTRIES="  - source: quay.io/openshift-release-dev/ocp-release
@@ -586,58 +459,54 @@ else
 fi
 
 REGISTRY_CA=""
-if confirm "El registry usa TLS con certificado propio? (no = HTTP plain, responder N)"; then
+echo -n "  El registry usa TLS con certificado propio? (responder n si es HTTP) [s/N]: "
+read -r _yn
+if [[ "$_yn" =~ ^[sS]$ ]]; then
   echo -n "  Ruta al certificado CA [Enter = /opt/registry/certs/ca.crt]: "
   read -r CERT_PATH
   [ -z "$CERT_PATH" ] && CERT_PATH="/opt/registry/certs/ca.crt"
-  if [ -f "$CERT_PATH" ]; then
-    REGISTRY_CA=$(cat "$CERT_PATH" | sed 's/^/      /')
-    ok "Certificado CA cargado"
-  else
-    err "Archivo no encontrado: $CERT_PATH — continuando sin CA"
-  fi
+  [ -f "$CERT_PATH" ] && REGISTRY_CA=$(cat "$CERT_PATH" | sed 's/^/      /') && ok "CA cargado" || warn "Archivo no encontrado, continuando sin CA"
 else
   ok "Registry HTTP sin TLS — no requiere CA"
 fi
 
-echo ""
-echo ""; echo -n "  Presiona ENTER para continuar..."; read -r _
+ask_enter
 
 # ──────────────────────────────────────────────────────────────
-# PASO 6: RESUMEN Y CONFIRMACION
+# PASO 6 — RESUMEN
 # ──────────────────────────────────────────────────────────────
 banner "PASO 6 de 7 — Resumen de Configuracion"
 
-echo -e "  ${WHT}${BOLD}CLUSTER${NC}"
-echo -e "  Nombre:        ${GRN}${CLUSTER_NAME}.${BASE_DOMAIN}${NC}"
-echo -e "  Topologia:     ${GRN}${CLUSTER_TYPE} (${NODE_COUNT} nodo/s)${NC}"
-echo -e "  OCP Version:   ${GRN}${OCP_VERSION}${NC}"
-echo -e "  API VIP:       ${GRN}${API_VIP}${NC}"
-echo -e "  Ingress VIP:   ${GRN}${INGRESS_VIP}${NC}"
-echo -e "  Machine CIDR:  ${GRN}${MACHINE_CIDR}${NC}"
-echo -e "  Cluster Net:   ${GRN}${CLUSTER_NET}${NC}"
-echo -e "  Service Net:   ${GRN}${SERVICE_NET}${NC}"
-echo -e "  Gateway:       ${GRN}${GATEWAY}${NC}"
-echo -e "  DNS:           ${GRN}${DNS_PRIMARY}${NC} / ${GRN}${DNS_SECONDARY}${NC}"
-echo -e "  NTP:           ${GRN}${NTP_PRIMARY}${NC} / ${GRN}${NTP_SECONDARY}${NC}"
+echo -e "  ${W}${BOLD}CLUSTER${N}"
+echo "  Nombre:       ${CLUSTER_NAME}.${BASE_DOMAIN}"
+echo "  Topologia:    ${CLUSTER_TYPE} (${NODE_COUNT} nodo/s)"
+echo "  OCP:          ${OCP_VERSION}"
+echo "  API VIP:      ${API_VIP}"
+echo "  Ingress VIP:  ${INGRESS_VIP}"
+echo "  Machine CIDR: ${MACHINE_CIDR}"
+echo "  Gateway:      ${GATEWAY}"
+echo "  DNS:          ${DNS_PRIMARY} / ${DNS_SECONDARY}"
+echo "  NTP:          ${NTP_PRIMARY} / ${NTP_SECONDARY}"
 echo ""
-echo -e "  ${WHT}${BOLD}NODOS${NC}"
+echo -e "  ${W}${BOLD}NODOS${N}"
 for i in "${!NODE_NAMES[@]}"; do
-  echo -e "  ${YEL}${NODE_NAMES[$i]}${NC}  IP: ${GRN}${NODE_IPS[$i]}${NC}  MAC: ${GRN}${NODE_MACS[$i]}${NC}  iface: ${GRN}${NODE_IFACES[$i]}${NC}"
+  echo "  ${NODE_NAMES[$i]}  IP: ${NODE_IPS[$i]}  MAC: ${NODE_MACS[$i]}  iface: ${NODE_IFACES[$i]}"
 done
 echo ""
-echo -e "  ${WHT}${BOLD}REGISTRY${NC}"
-echo -e "  Mirror: ${GRN}http://${REGISTRY}${NC}"
-echo -e "  ICSP:   ${GRN}${ICSP_FILE:-generica}${NC}"
+echo -e "  ${W}${BOLD}REGISTRY${N}"
+echo "  Mirror: http://${REGISTRY}"
+echo "  ICSP:   ${ICSP_FILE:-generica}"
 echo ""
 
-if ! confirm "Confirmar y generar la ISO?"; then
-  warn "Cancelado por el usuario."
+echo -n "  Confirmar y generar la ISO? [s/N]: "
+read -r _CONFIRM
+if [[ ! "$_CONFIRM" =~ ^[sS]$ ]]; then
+  echo "  Cancelado."
   exit 0
 fi
 
 # ──────────────────────────────────────────────────────────────
-# PASO 7: GENERACION
+# PASO 7 — GENERACION
 # ──────────────────────────────────────────────────────────────
 banner "PASO 7 de 7 — Generando archivos e ISO"
 
@@ -645,7 +514,7 @@ CLUSTER_DIR="${OUTPUT_DIR}/${CLUSTER_NAME}"
 mkdir -p "${CLUSTER_DIR}"
 ok "Directorio: ${CLUSTER_DIR}"
 
-# ── Pull secret con registry local ───────────────────────────
+# Pull secret con registry local agregado
 PULL_SECRET_RAW=$(cat "$PULL_SECRET_FILE")
 LOCAL_AUTH=$(echo -n "unused:unused" | base64 -w0)
 PULL_SECRET_MERGED=$(echo "$PULL_SECRET_RAW" | python3 -c "
@@ -657,24 +526,20 @@ print(json.dumps(ps))")
 # ── install-config.yaml ───────────────────────────────────────
 step "Generando install-config.yaml..."
 
-if [ "$NODE_COUNT" -eq 3 ]; then
-  PLATFORM_SECTION="platform:
+[ "$NODE_COUNT" -eq 3 ] && PLATFORM_BLOCK="platform:
   baremetal:
     apiVIPs:
       - ${API_VIP}
     ingressVIPs:
-      - ${INGRESS_VIP}"
-else
-  PLATFORM_SECTION="platform:
+      - ${INGRESS_VIP}" || PLATFORM_BLOCK="platform:
   none: {}"
-fi
 
-TRUST_BUNDLE=""
-[ -n "$REGISTRY_CA" ] && TRUST_BUNDLE="additionalTrustBundle: |
+TRUST_BLOCK=""
+[ -n "$REGISTRY_CA" ] && TRUST_BLOCK="additionalTrustBundle: |
 ${REGISTRY_CA}"
 
-ICS_SECTION=""
-[ -n "$MIRROR_REGISTRIES" ] && ICS_SECTION="imageContentSources:
+ICS_BLOCK=""
+[ -n "$MIRROR_REGISTRIES" ] && ICS_BLOCK="imageContentSources:
 ${MIRROR_REGISTRIES}"
 
 cat > "${CLUSTER_DIR}/install-config.yaml" << YAML
@@ -698,20 +563,16 @@ networking:
   networkType: OVNKubernetes
   serviceNetwork:
     - ${SERVICE_NET}
-${PLATFORM_SECTION}
+${PLATFORM_BLOCK}
 pullSecret: '${PULL_SECRET_MERGED}'
 sshKey: '${SSH_KEY}'
-${TRUST_BUNDLE}
-${ICS_SECTION}
+${TRUST_BLOCK}
+${ICS_BLOCK}
 YAML
 ok "install-config.yaml generado"
 
 # ── agent-config.yaml ─────────────────────────────────────────
 step "Generando agent-config.yaml..."
-
-NTP_SECTION="  - ${NTP_PRIMARY}"
-[ -n "$NTP_SECONDARY" ] && NTP_SECTION="${NTP_SECTION}
-  - ${NTP_SECONDARY}"
 
 HOSTS_YAML=""
 for i in "${!NODE_NAMES[@]}"; do
@@ -753,13 +614,14 @@ metadata:
   name: ${CLUSTER_NAME}
 rendezvousIP: ${NODE_IPS[0]}
 additionalNTPSources:
-${NTP_SECTION}
+  - ${NTP_PRIMARY}
+  - ${NTP_SECONDARY}
 hosts:
 ${HOSTS_YAML}
 YAML
 ok "agent-config.yaml generado"
 
-# ── Backup y generar ISO ──────────────────────────────────────
+# ── Generar ISO ───────────────────────────────────────────────
 step "Ejecutando openshift-install agent create image..."
 echo ""
 
@@ -772,79 +634,72 @@ openshift-install agent create image \
   --log-level info \
   2>&1 | tee "${CLUSTER_DIR}/iso-generate.log"
 
-ISO_FILE=$(find "${CLUSTER_DIR}" -name "agent.x86_64.iso" -o -name "*.iso" 2>/dev/null | grep -v ".bak" | head -1)
+ISO_FILE=$(find "${CLUSTER_DIR}" -name "*.iso" 2>/dev/null | head -1)
 
 echo ""
 if [ -n "$ISO_FILE" ] && [ -f "$ISO_FILE" ]; then
   ISO_SIZE=$(du -sh "$ISO_FILE" | cut -f1)
 
-  echo -e "${GRN}${BOLD}"
+  echo -e "${G}${BOLD}"
   echo "  ╔══════════════════════════════════════════════════════════╗"
   echo "  ║              ISO GENERADA CON EXITO                     ║"
   echo "  ╚══════════════════════════════════════════════════════════╝"
-  echo -e "${NC}"
+  echo -e "${N}"
   ok "ISO:    ${ISO_FILE}"
   ok "Tamano: ${ISO_SIZE}"
-
   echo ""
-  echo -e "  ${BLU}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
-  echo -e "  ${BLU}${BOLD}║                  PROXIMOS PASOS                         ║${NC}"
-  echo -e "  ${BLU}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
+  echo -e "  ${B}${BOLD}╔══════════════════════════════════════════════════════════╗${N}"
+  echo -e "  ${B}${BOLD}║                  PROXIMOS PASOS                         ║${N}"
+  echo -e "  ${B}${BOLD}╚══════════════════════════════════════════════════════════╝${N}"
   echo ""
 
   if [ "$NODE_COUNT" -eq 1 ]; then
-    echo -e "  ${YEL}${BOLD}1. Montar la ISO en la VM y bootear${NC}"
-    echo -e "     ${GRN}${NODE_NAMES[0]}${NC}  IP: ${GRN}${NODE_IPS[0]}${NC}  MAC: ${GRN}${NODE_MACS[0]}${NC}"
+    echo "  1. Montar la ISO en la VM y bootear"
+    echo "     ${NODE_NAMES[0]}  IP: ${NODE_IPS[0]}  MAC: ${NODE_MACS[0]}"
   else
-    echo -e "  ${YEL}${BOLD}1. Montar la MISMA ISO en las 3 VMs y bootear${NC}"
-    echo -e "     ${DIM}(pueden arrancar en cualquier orden)${NC}"
-    echo ""
+    echo "  1. Montar la MISMA ISO en las 3 VMs y bootear"
+    echo "     (pueden arrancar en cualquier orden)"
     for i in "${!NODE_NAMES[@]}"; do
-      echo -e "     ${GRN}${NODE_NAMES[$i]}${NC}  IP: ${GRN}${NODE_IPS[$i]}${NC}  MAC: ${GRN}${NODE_MACS[$i]}${NC}"
+      echo "     ${NODE_NAMES[$i]}  IP: ${NODE_IPS[$i]}  MAC: ${NODE_MACS[$i]}"
     done
   fi
-  echo -e "     ISO: ${CYN}${ISO_FILE}${NC}"
+  echo "     ISO: ${ISO_FILE}"
 
   echo ""
-  echo -e "  ${YEL}${BOLD}2. Monitorear el proceso de instalacion${NC}"
+  echo "  2. Monitorear el proceso de instalacion"
   echo ""
-  echo -e "  ${CYN}openshift-install agent wait-for bootstrap-complete \\${NC}"
-  echo -e "  ${CYN}  --dir ${CLUSTER_DIR}${NC}"
+  echo "     openshift-install agent wait-for bootstrap-complete \\"
+  echo "       --dir ${CLUSTER_DIR}"
   echo ""
-  echo -e "  ${CYN}openshift-install agent wait-for install-complete \\${NC}"
-  echo -e "  ${CYN}  --dir ${CLUSTER_DIR}${NC}"
+  echo "     openshift-install agent wait-for install-complete \\"
+  echo "       --dir ${CLUSTER_DIR}"
 
   echo ""
-  echo -e "  ${YEL}${BOLD}3. Acceder al cluster${NC}"
+  echo "  3. Acceder al cluster"
   echo ""
-  echo -e "  ${CYN}export KUBECONFIG=${CLUSTER_DIR}/auth/kubeconfig${NC}"
-  echo -e "  ${CYN}oc get nodes${NC}"
-  echo -e "  ${CYN}oc get co${NC}  ${DIM}# cluster operators${NC}"
+  echo "     export KUBECONFIG=${CLUSTER_DIR}/auth/kubeconfig"
+  echo "     oc get nodes"
+  echo "     oc get co    # cluster operators"
 
   echo ""
-  echo -e "  ${YEL}${BOLD}4. Password de kubeadmin${NC}"
+  echo "  4. Password de kubeadmin"
   echo ""
-  echo -e "  ${CYN}cat ${CLUSTER_DIR}/auth/kubeadmin-password${NC}"
+  echo "     cat ${CLUSTER_DIR}/auth/kubeadmin-password"
 
   echo ""
-  echo -e "  ${YEL}${BOLD}5. Consola web${NC}"
+  echo "  5. Consola web"
   echo ""
-  echo -e "  ${WHT}https://console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}${NC}"
+  echo "     https://console-openshift-console.apps.${CLUSTER_NAME}.${BASE_DOMAIN}"
 
   # Guardar comandos en archivo
   cat > "${CLUSTER_DIR}/post-install-commands.sh" << POSTCMD
 #!/bin/bash
-# ============================================================
-# Comandos post-instalacion
-# Cluster: ${CLUSTER_NAME}.${BASE_DOMAIN}
-# Generado por 05-generate-cluster-iso.sh
-# ============================================================
+# Comandos post-instalacion — ${CLUSTER_NAME}.${BASE_DOMAIN}
 
 # 1. Montar la ISO en la/s VM/s y bootear
 #    ISO: ${ISO_FILE}
-EOF_ISO
 
-# 2. Monitorear el proceso de instalacion
+# 2. Monitorear instalacion
 openshift-install agent wait-for bootstrap-complete \\
   --dir ${CLUSTER_DIR}
 
@@ -854,7 +709,7 @@ openshift-install agent wait-for install-complete \\
 # 3. Acceder al cluster
 export KUBECONFIG=${CLUSTER_DIR}/auth/kubeconfig
 oc get nodes
-oc get co    # cluster operators
+oc get co
 
 # 4. Password de kubeadmin
 cat ${CLUSTER_DIR}/auth/kubeadmin-password
@@ -870,14 +725,14 @@ else
   err "No se encontro la ISO generada."
   warn "Revisar log: ${CLUSTER_DIR}/iso-generate.log"
   echo ""
-  echo -e "  ${WHT}Intento manual:${NC}"
-  echo -e "  ${CYN}cd ${CLUSTER_DIR}${NC}"
-  echo -e "  ${CYN}cp install-config.yaml.bak install-config.yaml${NC}"
-  echo -e "  ${CYN}cp agent-config.yaml.bak   agent-config.yaml${NC}"
-  echo -e "  ${CYN}openshift-install agent create image --dir . --log-level debug${NC}"
+  echo "  Intento manual:"
+  echo "    cd ${CLUSTER_DIR}"
+  echo "    cp install-config.yaml.bak install-config.yaml"
+  echo "    cp agent-config.yaml.bak   agent-config.yaml"
+  echo "    openshift-install agent create image --dir . --log-level debug"
 fi
 
 echo ""
-echo -e "  ${CYN}Directorio: ${CLUSTER_DIR}${NC}"
-echo -e "  ${CYN}Log:        ${CLUSTER_DIR}/iso-generate.log${NC}"
+echo "  Directorio: ${CLUSTER_DIR}"
+echo "  Log:        ${CLUSTER_DIR}/iso-generate.log"
 echo ""
